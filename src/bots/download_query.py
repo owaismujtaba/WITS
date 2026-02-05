@@ -31,10 +31,6 @@ class DownloadQueryBot:
             self.current_page = int(page_no[-1])
         else:
             self.current_page = 1
-
-    def write_done_info(self):
-        with open(self.download_dir / 'done_pages.txt', 'w') as f:
-            f.write(str(self.current_page)) 
             
     def setup_dirs(self):
         self.logger.info("Setting up directories...")
@@ -56,22 +52,126 @@ class DownloadQueryBot:
             return True
 
     def handle_dialog(self, dialog):
-        self.logger.info(f"   [ALERT] Dialog Detected: {dialog.message} -> Clicking OK.")
         dialog.accept()
         self.dialog_handled = True
         return True
 
+    def _get_visible_pages(self):
+        try:
+            grid_id = "MainContent_QueryViewControl1_grdvQueryList"
+            # Use a loop to handle cases where the page might be multiple '...' sets away
+            max_attempts = 15
+            for attempt in range(max_attempts):
+                self.page.wait_for_timeout(1000) # Small extra wait for stability
+                
+                # Check current visible pages
+                pager_elements_info = self.page.evaluate(f"""
+                    () => {{
+                        let row = document.querySelector('tr.grid-footer');
+                        if (!row) {{
+                           const rows = Array.from(document.querySelectorAll('#{grid_id} tr'));
+                           row = rows.find(r => {{
+                               const links = r.querySelectorAll('a');
+                               return links.length >= 2 && (r.innerText.includes('...') || 
+                                      Array.from(links).some(a => !isNaN(a.innerText.trim()) && a.innerText.trim() !== ''));
+                           }});
+                        }}
+                        if (!row) return {{ pages: [], has_ellipsis: false }};
+                        const links = Array.from(row.querySelectorAll('td span, td a'));
+                        return {{
+                            pages: links.map(l => l.innerText.trim()).filter(t => !isNaN(t) && t !== ''),
+                            has_ellipsis: Array.from(row.querySelectorAll('a')).some(a => a.innerText.includes('...'))
+                        }};
+                    }}
+                """)
+                
+            visible_pages = [int(p) for p in pager_elements_info.get('pages', [])]
+            return visible_pages
+        except Exception as e:
+            self.logger.error(f"Error getting first window pages: {e}")
+            return False
+
+    def proceed_next_window(self):
+        try:
+            grid_id = "MainContent_QueryViewControl1_grdvQueryList"
+            # Use a loop to handle cases where the page might be multiple '...' sets away
+            max_attempts = 5
+            for attempt in range(max_attempts):
+                self.page.wait_for_timeout(1000) # Small extra wait for stability
+            
+                # Check current visible pages
+                pager_elements_info = self.page.evaluate(f"""
+                    () => {{
+                        let row = document.querySelector('tr.grid-footer');
+                        if (!row) {{
+                            const rows = Array.from(document.querySelectorAll('#{grid_id} tr'));
+                            row = rows.find(r => {{
+                                const links = r.querySelectorAll('a');
+                                return links.length >= 2 && (r.innerText.includes('...') || 
+                                        Array.from(links).some(a => !isNaN(a.innerText.trim()) && a.innerText.trim() !== ''));
+                            }});
+                        }}
+                        if (!row) return {{ pages: [], has_ellipsis: false }};
+                        const links = Array.from(row.querySelectorAll('td span, td a'));
+                        return {{
+                            pages: links.map(l => l.innerText.trim()).filter(t => !isNaN(t) && t !== ''),
+                            has_ellipsis: Array.from(row.querySelectorAll('a')).some(a => a.innerText.includes('...'))
+                        }};
+                    }}
+                """)
+                
+            visible_pages = [int(p) for p in pager_elements_info.get('pages', [])]
+            has_ellipsis = pager_elements_info.get('has_ellipsis', False)
+            if not visible_pages:
+                self.logger.warning("No visible pages found.")
+                return False
+                
+            if has_ellipsis:
+                idx = -1
+                self.logger.info(f"Moving to the next window of pages...")
+                self.page.evaluate(f"""
+                    (index) => {{
+                        const row = document.querySelector('tr.grid-footer');
+                        const ellipses = Array.from(row.querySelectorAll('a')).filter(a => a.innerText.includes('...'));
+                        if (ellipses.length > 0) {{
+                            const target = index === -1 ? ellipses[ellipses.length - 1] : ellipses[0];
+                            target.click();
+                        }}
+                    }}
+                    """, idx)
+            self.page.wait_for_load_state('networkidle')
+            self.page.wait_for_timeout(1000)
+        
+            return visible_pages
+        except Exception as e:
+            self.logger.error(f"Error moving to next window: {e}")
+            return False
+                
+
+
     def _handle_pagination(self, current_page):
         try:
-            self.logger.info("Handling pagination...")
-            if current_page > 1:
-                self.logger.info("Navigating to page {}...".format(current_page))
-                
+            # If page 1, we are already there after 'navigate_to_results'
+            self.logger.info(f" Navigationg to page: {current_page}")
+            if current_page == 1:
+                self.logger.info("Already on page 1")
+                return True
+            elif current_page > 1 and current_page <= 11:
+                pages = self._get_visible_pages()
+                self.logger.info(f"Visible pages: {pages}")
+            
+            else:
+                self.logger.info(f"Navigating to ... button")
+                n_forwards = current_page//10
+                for index in range(n_forwards):
+                    pages = self.proceed_next_window()
+                    self.logger.info(f"Visible pages: {pages}")
+
+            
         except Exception as e:
-            self.logger.error("Failed to handle pagination...")
-            self.logger.error(str(e))
-            return False    
-        return True
+            self.logger.error(f"Error handling pagination: {e}")
+            return False
+                    
     
     def _get_download_targets(self):
         self.logger.info("Getting download targets...")
@@ -90,7 +190,6 @@ class DownloadQueryBot:
             q_name = cells.nth(1).inner_text().strip()
             targets.append({"id": q_id, "name": q_name})
         return targets
-
 
     def _handle_download_popup(self, download_icon):
         try:
@@ -141,15 +240,56 @@ class DownloadQueryBot:
             found_frame.locator('#RptCoulmnSelection1_btnProcessed').click()
             self.logger.info("Clicked 'Download' button.")
             self.page.wait_for_timeout(1000)
-            
-
+            return "DOWNLOADED"
         except Exception as e:
             self.logger.error("Failed to handle download popup...")
             self.logger.error(str(e))
             return "ERROR"
-        return "DOWNLOADED"
+    
+    def write_skipped_targets(self, skipped_targets):
+        with open("output/download/skipped_targets.txt", "a") as f:
+            for target in skipped_targets:
+                f.write(target['id'] + "\n")
 
+    def write_failed_targets(self, failed_targets):
+        with open("output/download/failed_targets.txt", "a") as f:
+            for target in failed_targets:
+                f.write(target['id'] + "\n")
 
+    def write_done_targets(self, done_targets):
+        with open("output/download/done_targets.txt", "a") as f:
+            for target in done_targets:
+                f.write(target['id'] + "\n")
+
+    def write_done_pages(self, done_pages):
+        with open("output/download/done_pages.txt", "a") as f:
+            for page in done_pages:
+                f.write(str(page) + "\n")
+
+    def load_done_targets(self):
+        try:
+            with open("output/download/done_targets.txt", "r") as f:
+                return [int(line.strip()) for line in f]
+        except FileNotFoundError:
+            return []
+
+    def load_done_pages(self):
+        try:
+            with open("output/download/done_pages.txt", "r") as f:
+                try:
+                    return [int(line.strip()) for line in f][-1]
+                except IndexError:
+                    return 1
+        except FileNotFoundError:
+            return 1
+    
+    def load_failed_targets(self):
+        try:
+            with open("output/download/failed_targets.txt", "r") as f:
+                return [int(line.strip()) for line in f]
+        except FileNotFoundError:
+            return []
+            
     def _download_target(self, target):
         try:
             self.logger.info("Downloading target {}...".format(target))
@@ -172,9 +312,6 @@ class DownloadQueryBot:
             self.logger.error(str(e))
             return "ERROR"
 
-
-
-
     def execute(self):
         self.start_browser()
         if self.login():
@@ -182,43 +319,53 @@ class DownloadQueryBot:
             self.logger.info("   WITS AUTOMATION: STARTING EXECUTION")
             self.logger.info("="*60 + "\n")
             if navigate_to_results(self.page, self.logger):
-                self.logger.info("Navigated to results page.")
-                self.load_done_info()
+                self.current_page = self.load_done_pages()
                 current_page = self.current_page
+                done_ids = self.load_done_targets()
+                failed_ids = self.load_failed_targets()
                 while True:
                     if self._handle_pagination(current_page):
                         self.logger.info("Navigated to page {}".format(current_page))
                     else:
                         self.logger.error("Failed to navigate to page {}".format(current_page))
+                        # If failed to navigate and it's > 1, prevent infinite loop if stuck
                         break
+                            
                     ensure_popup_closed(self.page, self.logger)
-                    done_targets = []
-                    failed_targets = []
-                    download_targets = self._get_download_targets()
-                    not_downloaded_targets = download_targets - done_targets
-                    
-                    for target in not_downloaded_targets:
+                    done_ids = set(done_ids)
+                    all_targets = self._get_download_targets()
+                    not_downloaded_targets = [t for t in all_targets if t['id'] not in done_ids]
+
+                    while not_downloaded_targets:
+                        target = not_downloaded_targets.pop(0)
+                        self.logger.info("="*60)
                         status = self._download_target(target)
                         if status == "DOWNLOADED":
+                            self.write_done_targets([target])
+                            ensure_popup_closed(self.page, self.logger)
+                            navigate_to_results(self.page, self.logger)
                             self._handle_pagination(current_page)
+                            done_ids.add(target['id'])
                             self.logger.info("Downloaded target {}".format(target))
-                            targets = self._get_download_targets()  
-                            not_downloaded_targets = targets-done_targets
-                            done_targets.append(target)
+                            targets = self._get_download_targets()
+                            not_downloaded_targets = [t for t in targets if t['id'] not in done_ids]
+                            ensure_popup_closed(self.page, self.logger)
+                        
                         elif status == "SKIPPED":
                             self.logger.info("Skipped target {} (Data not available)".format(target))
-                            not_downloaded_targets = targets-done_targets
-                            done_targets.append(target)
+                            done_ids.add(target['id'])
+                            self.write_skipped_targets([target])
                         else:
                             self.logger.error("Failed to download target {}".format(target))
-                            failed_targets.append(target)
+                            self.write_failed_targets([target])
                             continue
-
+                        if not not_downloaded_targets:
+                            self.current_page += 1
+                            current_page = self.current_page # Fix: Update local variable to prevent infinite loop
+                            self.write_done_pages([current_page])
                     
-                    self.current_page += 1
-                    self.write_done_info()
-
-                    break   
+                    
+    
             else:
                 self.logger.error("Failed to navigate to results page.")
         else:

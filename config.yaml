@@ -1,6 +1,6 @@
 # WITS Automation Configuration
 credentials:
-  email: "owaismujtaba@ugr.es"
+  email: "zask25802@gmail.com"
   password: "Abuji@2580"
   #query_name: ["Auto2010", "Auto2011", "Auto2012", "Auto2013"]
 
@@ -11,7 +11,7 @@ urls:
 
 browser_settings:
   browser: "chromium"
-  headless: false
+  headless: true
   
 workflow:
   execute_query: false

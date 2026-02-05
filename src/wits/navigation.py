@@ -15,9 +15,11 @@ def navigate_to_results(page, logger):
         trade_data_link = page.locator('#TopMenu1_DownloadandViewResults')
         trade_data_link.wait_for(state='visible', timeout=5000)
         trade_data_link.click()
-        page.wait_for_load_state('networkidle')        
+        page.wait_for_load_state('networkidle')   
+        logger.info("Navigated to results page successfully")     
         return True
     except:
+        logger.info("Navigated to results page failed")
         return False
 
 
