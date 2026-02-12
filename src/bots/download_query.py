@@ -151,23 +151,77 @@ class DownloadQueryBot:
 
     def _handle_pagination(self, current_page):
         try:
-            # If page 1, we are already there after 'navigate_to_results'
-            self.logger.info(f" Navigationg to page: {current_page}")
+            self.logger.info(f"Navigating to page: {current_page}")
             if current_page == 1:
                 self.logger.info("Already on page 1")
                 return True
-            elif current_page > 1 and current_page <= 11:
-                pages = self._get_visible_pages()
-                self.logger.info(f"Visible pages: {pages}")
             
-            else:
-                self.logger.info(f"Navigating to ... button")
-                n_forwards = current_page//10
-                for index in range(n_forwards):
-                    pages = self.proceed_next_window()
-                    self.logger.info(f"Visible pages: {pages}")
+            # Determine how many windows to advance
+            # Assuming windows are 1-10, 11-20, etc.
+            # Page 2 -> 0 advances
+            # Page 11 -> 1 advance (to see 11-20)
+            # Page 10 -> 0 advances? Usually 1-10 are visible.
+            
+            # Use dynamic navigation: check if page is visible, if not click ...
+            
+            max_attempts = 20 # Safety break
+            for _ in range(max_attempts):
+                visible_pages = self._get_visible_pages()
+                if not visible_pages:
+                    self.logger.error("No visible pages found during pagination.")
+                    return False
+                
+                self.logger.info(f"Visible pages: {visible_pages}")
+                
+                if current_page in visible_pages:
+                    # Click the page
+                    self.logger.info(f"Page {current_page} is visible. Clicking...")
+                    grid_id = "MainContent_QueryViewControl1_grdvQueryList"
+                    
+                    # Find and click logic
+                    clicked = self.page.evaluate(f"""
+                        (targetPage) => {{
+                            const row = document.querySelector('tr.grid-footer');
+                            if (!row) return false;
+                            const links = Array.from(row.querySelectorAll('a'));
+                            const link = links.find(a => a.innerText.trim() === targetPage.toString());
+                            if (link) {{
+                                link.click();
+                                return true;
+                            }}
+                            
+                            // Check spans (current page is usually a span, not a link)
+                            const spans = Array.from(row.querySelectorAll('span'));
+                            const span = spans.find(s => s.innerText.trim() === targetPage.toString());
+                            if (span) return true; // Already on page
+                            
+                            return false;
+                        }}
+                    """, current_page)
+                    
+                    if clicked:
+                        self.page.wait_for_load_state('networkidle')
+                        self.page.wait_for_timeout(1000)
+                        self.logger.info(f"Successfully clicked page {current_page}")
+                        return True
+                    else:
+                        # If evaluate returned True but didn't click (means it's a span, already active)
+                        self.logger.info(f"Page {current_page} is already active.")
+                        return True
 
+                # If not visible, check if we need to go forward or backward
+                # For download bot, we usually just go forward
+                if current_page > max(visible_pages):
+                    self.logger.info("Target page is ahead. Clicking '...'")
+                    pages = self.proceed_next_window()
+                    if not pages:
+                        return False
+                else:
+                    self.logger.error(f"Target page {current_page} is smaller than visible pages {visible_pages}. logic error?")
+                    return False
             
+            return False
+
         except Exception as e:
             self.logger.error(f"Error handling pagination: {e}")
             return False
@@ -191,7 +245,7 @@ class DownloadQueryBot:
             targets.append({"id": q_id, "name": q_name})
         return targets
 
-    def _handle_download_popup(self, download_icon):
+    def _handle_download_popup(self, download_icon, target):
         try:
             self.logger.info("Handling download popup...")
             ensure_popup_closed(self.page, self.logger)
@@ -206,16 +260,21 @@ class DownloadQueryBot:
             download_icon.click(force=True)
             self.logger.info("Clicked download icon.")
             
-            # Wait briefly to allow dialog event to fire if it exists
+            # ---------------------------------------------------------
+            # LOGIC CORRECTION PER USER:
+            # 1. Alert occurs (No data OR Already processed) -> SKIP
+            # 2. iFrame loads -> SUBMIT QUERY
+            # ---------------------------------------------------------
+
+            # Step 1: Wait briefly for an immediate alert
             self.page.wait_for_timeout(2000)
 
             if self.dialog_handled:
                 self.dialog_handled = False
-                self.logger.info("Dialog was handled (likely 'Data not available'). Skipping download popup.")
+                self.logger.info("Alert detected immediately (No data / Already processed). SKIPPED.")
                 return "SKIPPED"
 
-            self.page.wait_for_timeout(1000)
-
+            # Step 2: If no alert, look for the iFrame
             found_frame = None
             for _ in range(5):
                 for frame in self.page.frames:
@@ -229,18 +288,34 @@ class DownloadQueryBot:
                     break
                 self.page.wait_for_timeout(1000)
             
-            if not found_frame:
-                self.logger.error("Popup frame not found.")
+            if not found_frame:                  
+                self.logger.error("Popup frame not found and no alert detected.")
                 return "ERROR"
             
-            self.logger.info("Found selection popup frame.")
+            self.logger.info("Found selection popup frame (Valid for submission).")
             found_frame.locator('#btnMoveAll').click()
             self.logger.info("Clicked 'Move All' (>>).")
             self.page.wait_for_timeout(1000)
-            found_frame.locator('#RptCoulmnSelection1_btnProcessed').click()
-            self.logger.info("Clicked 'Download' button.")
-            self.page.wait_for_timeout(1000)
-            return "DOWNLOADED"
+            
+            # Step 3: Submit Query 
+            try:
+                # Click the final button to submit
+                found_frame.locator('#RptCoulmnSelection1_btnProcessed').click()
+                self.logger.info("Clicked 'Download' (Send Query) button.")
+                
+                # Check for any post-submission alerts (just in case), but usually this is success
+                self.page.wait_for_timeout(2000)
+                
+                if self.dialog_handled:
+                    self.logger.info("Alert detected during query submission. Marking as Done.")
+                    return "DOWNLOADED"
+                
+                self.logger.info("Query submitted successfully.")
+                return "DOWNLOADED"
+
+            except Exception as e:
+                self.logger.error(f"Error submitting query: {e}")
+                return "ERROR"
         except Exception as e:
             self.logger.error("Failed to handle download popup...")
             self.logger.error(str(e))
@@ -283,6 +358,13 @@ class DownloadQueryBot:
         except FileNotFoundError:
             return 1
     
+    def load_skipped_targets(self):
+        try:
+            with open("output/download/skipped_targets.txt", "r") as f:
+                return [int(line.strip()) for line in f if line.strip()]
+        except FileNotFoundError:
+            return []
+
     def load_failed_targets(self):
         try:
             with open("output/download/failed_targets.txt", "r") as f:
@@ -304,7 +386,7 @@ class DownloadQueryBot:
             ensure_popup_closed(self.page, self.logger)
             setup_auto_close_popup(self.page, self.logger)  
         
-            status = self._handle_download_popup(download_icon)
+            status = self._handle_download_popup(download_icon, target)
             return status
             
         except Exception as e:
@@ -322,7 +404,13 @@ class DownloadQueryBot:
                 self.current_page = self.load_done_pages()
                 current_page = self.current_page
                 done_ids = self.load_done_targets()
+                skipped_ids = self.load_skipped_targets()
                 failed_ids = self.load_failed_targets()
+                
+                # Combine skipped into done to avoid retry
+                processed_ids = set(done_ids)
+                processed_ids.update(skipped_ids)
+
                 while True:
                     if self._handle_pagination(current_page):
                         self.logger.info("Navigated to page {}".format(current_page))
@@ -332,9 +420,10 @@ class DownloadQueryBot:
                         break
                             
                     ensure_popup_closed(self.page, self.logger)
-                    done_ids = set(done_ids)
+                    
                     all_targets = self._get_download_targets()
-                    not_downloaded_targets = [t for t in all_targets if t['id'] not in done_ids]
+                    # Filter out processed ids
+                    not_downloaded_targets = [t for t in all_targets if int(t['id']) not in processed_ids]
 
                     while not_downloaded_targets:
                         target = not_downloaded_targets.pop(0)
@@ -345,27 +434,30 @@ class DownloadQueryBot:
                             ensure_popup_closed(self.page, self.logger)
                             navigate_to_results(self.page, self.logger)
                             self._handle_pagination(current_page)
-                            done_ids.add(target['id'])
+                            processed_ids.add(int(target['id']))
                             self.logger.info("Downloaded target {}".format(target))
+                            
                             targets = self._get_download_targets()
-                            not_downloaded_targets = [t for t in targets if t['id'] not in done_ids]
+                            not_downloaded_targets = [t for t in targets if int(t['id']) not in processed_ids]
                             ensure_popup_closed(self.page, self.logger)
                         
                         elif status == "SKIPPED":
-                            self.logger.info("Skipped target {} (Data not available)".format(target))
-                            done_ids.add(target['id'])
+                            self.logger.info("Skipped target {} (Data not available or alert)".format(target))
+                            # Re-enabling navigation to ensure clean state after alert/popup issues
+                            ensure_popup_closed(self.page, self.logger)
+                            navigate_to_results(self.page, self.logger)
+                            self._handle_pagination(current_page)
+                            
+                            processed_ids.add(int(target['id'])) # Add to local set
                             self.write_skipped_targets([target])
                         else:
                             self.logger.error("Failed to download target {}".format(target))
                             self.write_failed_targets([target])
                             continue
-                        if not not_downloaded_targets:
-                            self.current_page += 1
-                            current_page = self.current_page # Fix: Update local variable to prevent infinite loop
-                            self.write_done_pages([current_page])
-                    
-                    
-    
+                            
+                    self.current_page += 1
+                    current_page = self.current_page # Fix: Update local variable to prevent infinite loop
+                    self.write_done_pages([current_page])
             else:
                 self.logger.error("Failed to navigate to results page.")
         else:
