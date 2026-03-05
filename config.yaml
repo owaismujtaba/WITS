@@ -1,6 +1,7 @@
 # WITS Automation Configuration
 credentials:
-  email: "zask25802@gmail.com"
+  #email: "zask25802@gmail.com"
+  email: "documents.owais@gmail.com"
   password: "Abuji@2580"
   #query_name: ["Auto2010", "Auto2011", "Auto2012", "Auto2013"]
 
@@ -14,8 +15,8 @@ browser_settings:
   headless: true
   
 workflow:
-  execute_query: false
-  download_query: true
+  execute_query: true
+  download_query: false
 
 iso3_to_country : {
     'ABW': 'Aruba',
