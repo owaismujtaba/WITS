@@ -86,7 +86,7 @@ class ExecuteQueryBot:
         all_countries = set(self.config['iso3_to_country'].keys())
         countries_to_process = all_countries - done_countries
         countries_to_process = sorted(countries_to_process)
-        #random.shuffle(countries_to_process)
+        random.shuffle(countries_to_process)
         failed_countries = set()
         
         total = len(countries_to_process)
