@@ -17,21 +17,11 @@ class DownloadQueryBot:
         self.browser_manager = BrowserManager(config)
         self.browser = None
         self.page = None
+        self.download_dir = Path("output/download")
+        self.current_page = 1
+        self.dialog_handled = False
         self.setup_dirs()
         
-    def load_done_info(self):
-        file_path = self.download_dir / 'done_pages.txt'
-        if not file_path.exists():
-            self.current_page = 1
-            return
-
-        with open(file_path, 'r') as f:
-            page_no = f.read().splitlines()
-        if page_no:
-            self.current_page = int(page_no[-1])
-        else:
-            self.current_page = 1
-            
     def setup_dirs(self):
         self.logger.info("Setting up directories...")
         cur_dir = os.getcwd()
@@ -59,85 +49,77 @@ class DownloadQueryBot:
     def _get_visible_pages(self):
         try:
             grid_id = "MainContent_QueryViewControl1_grdvQueryList"
-            # Use a loop to handle cases where the page might be multiple '...' sets away
-            max_attempts = 15
-            for attempt in range(max_attempts):
-                self.page.wait_for_timeout(1000) # Small extra wait for stability
-                
-                # Check current visible pages
-                pager_elements_info = self.page.evaluate(f"""
-                    () => {{
-                        let row = document.querySelector('tr.grid-footer');
-                        if (!row) {{
-                           const rows = Array.from(document.querySelectorAll('#{grid_id} tr'));
-                           row = rows.find(r => {{
-                               const links = r.querySelectorAll('a');
-                               return links.length >= 2 && (r.innerText.includes('...') || 
-                                      Array.from(links).some(a => !isNaN(a.innerText.trim()) && a.innerText.trim() !== ''));
-                           }});
-                        }}
-                        if (!row) return {{ pages: [], has_ellipsis: false }};
-                        const links = Array.from(row.querySelectorAll('td span, td a'));
-                        return {{
-                            pages: links.map(l => l.innerText.trim()).filter(t => !isNaN(t) && t !== ''),
-                            has_ellipsis: Array.from(row.querySelectorAll('a')).some(a => a.innerText.includes('...'))
-                        }};
+            # Wait for the pager to be present
+            self.page.wait_for_selector(f'#{grid_id} tr.grid-footer', timeout=5000)
+            
+            pager_elements_info = self.page.evaluate(f"""
+                (grid_id) => {{
+                    let row = document.querySelector('tr.grid-footer');
+                    if (!row) {{
+                       const rows = Array.from(document.querySelectorAll('#' + grid_id + ' tr'));
+                       row = rows.find(r => {{
+                           const links = r.querySelectorAll('a');
+                           return links.length >= 2 && (r.innerText.includes('...') || 
+                                  Array.from(links).some(a => !isNaN(a.innerText.trim()) && a.innerText.trim() !== ''));
+                       }});
                     }}
-                """)
-                
+                    if (!row) return {{ pages: [], has_ellipsis: false }};
+                    const links = Array.from(row.querySelectorAll('td span, td a'));
+                    return {{
+                        pages: links.map(l => l.innerText.trim()).filter(t => !isNaN(t) && t !== ''),
+                        has_ellipsis: Array.from(row.querySelectorAll('a')).some(a => a.innerText.includes('...'))
+                    }};
+                }}
+            """, grid_id)
+            
             visible_pages = [int(p) for p in pager_elements_info.get('pages', [])]
             return visible_pages
         except Exception as e:
             self.logger.error(f"Error getting first window pages: {e}")
-            return False
+            return []
 
     def proceed_next_window(self):
         try:
             grid_id = "MainContent_QueryViewControl1_grdvQueryList"
-            # Use a loop to handle cases where the page might be multiple '...' sets away
-            max_attempts = 5
-            for attempt in range(max_attempts):
-                self.page.wait_for_timeout(1000) # Small extra wait for stability
-            
-                # Check current visible pages
-                pager_elements_info = self.page.evaluate(f"""
-                    () => {{
-                        let row = document.querySelector('tr.grid-footer');
-                        if (!row) {{
-                            const rows = Array.from(document.querySelectorAll('#{grid_id} tr'));
-                            row = rows.find(r => {{
-                                const links = r.querySelectorAll('a');
-                                return links.length >= 2 && (r.innerText.includes('...') || 
-                                        Array.from(links).some(a => !isNaN(a.innerText.trim()) && a.innerText.trim() !== ''));
-                            }});
-                        }}
-                        if (!row) return {{ pages: [], has_ellipsis: false }};
-                        const links = Array.from(row.querySelectorAll('td span, td a'));
-                        return {{
-                            pages: links.map(l => l.innerText.trim()).filter(t => !isNaN(t) && t !== ''),
-                            has_ellipsis: Array.from(row.querySelectorAll('a')).some(a => a.innerText.includes('...'))
-                        }};
+            # Check current visible pages
+            pager_elements_info = self.page.evaluate(f"""
+                (grid_id) => {{
+                    let row = document.querySelector('tr.grid-footer');
+                    if (!row) {{
+                        const rows = Array.from(document.querySelectorAll('#' + grid_id + ' tr'));
+                        row = rows.find(r => {{
+                            const links = r.querySelectorAll('a');
+                            return links.length >= 2 && (r.innerText.includes('...') || 
+                                    Array.from(links).some(a => !isNaN(a.innerText.trim()) && a.innerText.trim() !== ''));
+                        }});
                     }}
-                """)
-                
+                    if (!row) return {{ pages: [], has_ellipsis: false }};
+                    const links = Array.from(row.querySelectorAll('td span, td a'));
+                    return {{
+                        pages: links.map(l => l.innerText.trim()).filter(t => !isNaN(t) && t !== ''),
+                        has_ellipsis: Array.from(row.querySelectorAll('a')).some(a => !isNaN(a.innerText) || a.innerText.includes('...'))
+                    }};
+                }}
+            """, grid_id)
+            
             visible_pages = [int(p) for p in pager_elements_info.get('pages', [])]
             has_ellipsis = pager_elements_info.get('has_ellipsis', False)
             if not visible_pages:
                 self.logger.warning("No visible pages found.")
-                return False
+                return []
                 
             if has_ellipsis:
                 idx = -1
                 self.logger.info(f"Moving to the next window of pages...")
-                self.page.evaluate(f"""
-                    (index) => {{
+                self.page.evaluate("""
+                    (index) => {
                         const row = document.querySelector('tr.grid-footer');
                         const ellipses = Array.from(row.querySelectorAll('a')).filter(a => a.innerText.includes('...'));
-                        if (ellipses.length > 0) {{
+                        if (ellipses.length > 0) {
                             const target = index === -1 ? ellipses[ellipses.length - 1] : ellipses[0];
                             target.click();
-                        }}
-                    }}
+                        }
+                    }
                     """, idx)
             self.page.wait_for_load_state('networkidle')
             self.page.wait_for_timeout(1000)
@@ -145,7 +127,7 @@ class DownloadQueryBot:
             return visible_pages
         except Exception as e:
             self.logger.error(f"Error moving to next window: {e}")
-            return False
+            return []
                 
 
 
@@ -379,10 +361,15 @@ class DownloadQueryBot:
             setup_auto_close_popup(self.page, self.logger)
 
             grid_selector = '#MainContent_QueryViewControl1_grdvQueryList'
-            target_row = self.page.locator(f'{grid_selector} tr').filter(has_text=target['id']).first
+            # Use a more specific selector to find the exact row matching the ID
+            # Assuming the ID is in the first <td>
+            target_row = self.page.locator(f'{grid_selector} tr').filter(
+                has=self.page.locator('td').first,
+                has_text=target['id']
+            ).first
 
             download_icon = target_row.locator('input[src*="Download"]')
-            download_icon.wait_for(state="visible", timeout=5000)
+            download_icon.wait_for(state="visible", timeout=10000)
             ensure_popup_closed(self.page, self.logger)
             setup_auto_close_popup(self.page, self.logger)  
         
@@ -422,8 +409,22 @@ class DownloadQueryBot:
                     ensure_popup_closed(self.page, self.logger)
                     
                     all_targets = self._get_download_targets()
+                    
+                    # Filter targets by query_name in config
+                    target_query_names = self.config.get('query_name', [])
+                    if isinstance(target_query_names, str):
+                        target_query_names = [target_query_names]
+                    
+                    filtered_targets = []
+                    for t in all_targets:
+                        # Check if target name matches any of our config query names
+                        if any(qn.lower() in t['name'].lower() for qn in target_query_names):
+                            filtered_targets.append(t)
+                    
+                    self.logger.info(f"Found {len(all_targets)} targets, filtered down to {len(filtered_targets)} based on config.")
+
                     # Filter out processed ids
-                    not_downloaded_targets = [t for t in all_targets if int(t['id']) not in processed_ids]
+                    not_downloaded_targets = [t for t in filtered_targets if int(t['id']) not in processed_ids]
 
                     while not_downloaded_targets:
                         target = not_downloaded_targets.pop(0)
