@@ -444,11 +444,7 @@ class DownloadQueryBot:
                         
                         elif status == "SKIPPED":
                             self.logger.info("Skipped target {} (Data not available or alert)".format(target))
-                            # Re-enabling navigation to ensure clean state after alert/popup issues
                             ensure_popup_closed(self.page, self.logger)
-                            navigate_to_results(self.page, self.logger)
-                            self._handle_pagination(current_page)
-                            
                             processed_ids.add(int(target['id'])) # Add to local set
                             self.write_skipped_targets([target])
                         else:
