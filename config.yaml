@@ -15,8 +15,8 @@ browser_settings:
   headless: true
   
 workflow:
-  execute_query: true
-  download_query: false
+  execute_query: false
+  download_query: true
 
 iso3_to_country : {
     'ABW': 'Aruba',
